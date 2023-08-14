@@ -26,6 +26,12 @@
 #include "Poco/RegularExpression.h"
 #include <sstream>
 
+#include "Poco/Logger.h"
+#include "Poco/Message.h"
+#include "Poco/ConsoleChannel.h"
+#include "Poco/PatternFormatter.h"
+#include "Poco/FormattingChannel.h"
+#include "Poco/DateTimeFormatter.h"
 
 using Poco::NumberFormatter;
 using Poco::IllegalStateException;
@@ -34,6 +40,26 @@ using Poco::IllegalStateException;
 namespace Poco {
 namespace Net {
 
+class CustomPatternFormatter : public Poco::PatternFormatter
+{
+public:
+    CustomPatternFormatter(const std::string& format) : Poco::PatternFormatter(format) {}
+
+protected:
+    virtual void format(const Poco::Message& msg, std::string& text) override
+    {
+        Poco::PatternFormatter::format(msg, text);
+
+        // 使用 Poco::LocalDateTime 和 Poco::DateTimeFormatter::append() 方法设置本地时区
+        Poco::LocalDateTime now;
+        std::string pattern = "%Y-%m-%d %H:%M:%S.%i";
+        std::string localTime;
+        Poco::DateTimeFormatter::append(localTime, now, pattern);
+
+        // 更新日志消息以使用本地时区
+        text.replace(0, localTime.length(), localTime);
+    }
+};
 
 HTTPClientSession::ProxyConfig HTTPClientSession::_globalProxyConfig;
 
@@ -193,29 +219,46 @@ void HTTPClientSession::setKeepAliveTimeout(const Poco::Timespan& timeout)
 
 std::ostream& HTTPClientSession::sendRequest(HTTPRequest& request)
 {
+	Poco::Logger& _logger = Poco::Logger::get("PocoHTTPClientSession");
+	Poco::AutoPtr<CustomPatternFormatter> pFormatter(new CustomPatternFormatter("%Y-%m-%d %H:%M:%S.%i [%p] %t"));
+    Poco::AutoPtr<Poco::FormattingChannel> pFormattingChannel(new Poco::FormattingChannel(pFormatter));
+    Poco::AutoPtr<Poco::ConsoleChannel> pConsoleChannel(new Poco::ConsoleChannel);
+    pFormattingChannel->setChannel(pConsoleChannel);
+
+    _logger.setChannel(pFormattingChannel);
+    _logger.setLevel(Poco::Message::PRIO_DEBUG);
+
+
+	_logger.debug("sendRequest Start! : " + request.getURI());
 	_pRequestStream = 0;
 	_pResponseStream = 0;
 	clearException();
 	_responseReceived = false;
 
+	_logger.debug("sendRequest: Initial Close Start : " + request.getURI());
 	bool keepAlive = getKeepAlive();
 	if (((connected() && !keepAlive) || mustReconnect()) && !_host.empty())
 	{
 		close();
 		_mustReconnect = false;
 	}
+	_logger.debug("sendRequest: Initial Close Done : " + request.getURI());
 	try
 	{
 		if (!connected())
+			_logger.debug("sendRequest: Reconnect Start : " + request.getURI());
 			reconnect();
+			_logger.debug("sendRequest: Reconnect Done : " + request.getURI());
 		if (!keepAlive)
 			request.setKeepAlive(false);
 		if (!request.has(HTTPRequest::HOST) && !_host.empty())
 			request.setHost(_host, _port);
 		if (!_proxyConfig.host.empty() && !bypassProxy())
 		{
+			_logger.debug("sendRequest: proxyAuthenticate Start : " + request.getURI());
 			request.setURI(proxyRequestPrefix() + request.getURI());
 			proxyAuthenticate(request);
+			_logger.debug("sendRequest: proxyAuthenticate Done : " + request.getURI());
 		}
 		_reconnect = keepAlive;
 		_expectResponseBody = request.getMethod() != HTTPRequest::HTTP_HEAD;
@@ -228,6 +271,7 @@ std::ostream& HTTPClientSession::sendRequest(HTTPRequest& request)
 		}
 		else if (request.hasContentLength())
 		{
+			_logger.debug("sendRequest: write Start : " + request.getURI());
 			Poco::CountingOutputStream cs;
 			request.write(cs);
 #if POCO_HAVE_INT64
@@ -236,6 +280,7 @@ std::ostream& HTTPClientSession::sendRequest(HTTPRequest& request)
 			_pRequestStream = new HTTPFixedLengthOutputStream(*this, request.getContentLength() + cs.chars());
 #endif
 			request.write(*_pRequestStream);
+			_logger.debug("sendRequest: write Done : " + request.getURI());
 		}
 		else if ((method != HTTPRequest::HTTP_PUT && method != HTTPRequest::HTTP_POST && method != HTTPRequest::HTTP_PATCH) || request.has(HTTPRequest::UPGRADE))
 		{
@@ -250,6 +295,7 @@ std::ostream& HTTPClientSession::sendRequest(HTTPRequest& request)
 			request.write(*_pRequestStream);
 		}
 		_lastRequest.update();
+		_logger.debug("sendRequest Done! : " + request.getURI());
 		return *_pRequestStream;
 	}
 	catch (Exception&)

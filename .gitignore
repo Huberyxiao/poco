@@ -133,3 +133,7 @@ cmake-build/
 stage/
 releases/
 /.metadata/
+
+
+/my_build
+.vscode
